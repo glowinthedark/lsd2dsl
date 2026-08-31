@@ -12,7 +12,7 @@ std::u16string readXoredPrefix(common::IBitStream* bstr, int len) {
     std::u16string res;
     for (int i = 0; i < len; i++) {
         char32_t symbol = bstr->read(16) ^ 0x879A;
-        res += symbol;
+        res += static_cast<char16_t>(symbol);
     }
     return res;
 }

@@ -83,7 +83,7 @@ jobs:
             libboost-program-options-dev libfmt-dev zlib1g-dev \
             libsndfile1-dev libvorbis-dev libogg-dev \
             qt6-base-dev qt6-base-dev-tools qt6-tools-dev \
-            qt6-webengine-dev qt6-webengine-dev-tools \
+            qt6-webengine-dev qt6-webengine-dev-tools qt6-pdf-dev \
             libgl1-mesa-dev libxkbcommon-dev libnss3 libxcomposite1 libxdamage1 \
             libxrandr2 libxtst6 libasound2t64 fuse3 file desktop-file-utils
           # Qt6Core5Compat package name differs between releases
@@ -257,19 +257,47 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "aqt install-qt failed" }
           }
 
+      - name: Set up MSVC environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The VS generator name is version-bound; vswhere + vcvars64 works for any
+          # installed Visual Studio (2022, 2026, Build Tools) and feeds Ninja instead.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $installs = & $vswhere -latest -prerelease -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vsPath = @($installs)[0]
+          if (-not $vsPath) {
+            Write-Host (& $vswhere -all -prerelease -products * -format json)
+            throw "no Visual Studio instance with the x64 C++ toolset"
+          }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          Write-Host "using $vsPath"
+
+          $skip = '^(GITHUB_|RUNNER_|ACTIONS_|_$)'
+          & cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]; $value = $matches[2]
+              if ($name -notmatch $skip) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+            }
+          }
+
       - name: Configure and build
         run: |
           $ErrorActionPreference = 'Stop'
           $qt6 = "$env:QT_ROOT\$env:QT_VERSION\msvc2022_64"
           if (-not (Test-Path $qt6)) { throw "Qt not found at $qt6" }
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=$env:BUILD_CONFIG `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
             -DENABLE_DUDEN=ON `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET `
             -DQt6_ROOT=$qt6 `
             -DCMAKE_PREFIX_PATH=$qt6
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
-          cmake --build build --config $env:BUILD_CONFIG --target lsd2dsl -- -m
+          cmake --build build --target lsd2dsl
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
       - name: Package ZIP

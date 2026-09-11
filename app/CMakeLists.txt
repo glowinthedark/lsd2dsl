@@ -76,28 +76,63 @@ if(WIN32)
     install(CODE "set(LSD2DSL_DLL_DIRS \"${_lsd2dsl_dll_dirs}\")")
     install(CODE "set(LSD2DSL_BINDIR \"${CMAKE_INSTALL_BINDIR}\")")
     install(CODE [[
-        set(_exe "${CMAKE_INSTALL_PREFIX}/${LSD2DSL_BINDIR}/lsd2dsl.exe")
+        set(_bindir "${CMAKE_INSTALL_PREFIX}/${LSD2DSL_BINDIR}")
         file(GET_RUNTIME_DEPENDENCIES
-            EXECUTABLES "${_exe}"
+            EXECUTABLES "${_bindir}/lsd2dsl.exe"
             RESOLVED_DEPENDENCIES_VAR _resolved
             UNRESOLVED_DEPENDENCIES_VAR _unresolved
             DIRECTORIES ${LSD2DSL_DLL_DIRS}
-            PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-" "^Qt6" "^d3d" "^dxgi" "^opengl32"
-            POST_EXCLUDE_REGEXES "[Ss]ystem32" "[Ww]indows[/\\]"
+            PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
         )
+        # Qt is windeployqt's job; the rest ship with Windows or the VC++
+        # redistributable. Filtering happens here rather than through
+        # PRE/POST_EXCLUDE_REGEXES because the case of the names CMake matches
+        # against is not guaranteed on Windows.
+        set(_skip "^qt6" "^d3d" "^dxgi" "^opengl32" "^vcruntime" "^msvcp" "^concrt" "^ucrtbase")
+
+        function(lsd2dsl_is_skipped _path _out)
+            get_filename_component(_name "${_path}" NAME)
+            string(TOLOWER "${_name}" _lname)
+            string(TOLOWER "${_path}" _lpath)
+            if(_lpath MATCHES "[/\\](system32|syswow64|windows)[/\\]")
+                set(${_out} TRUE PARENT_SCOPE)
+                return()
+            endif()
+            foreach(_re IN LISTS _skip)
+                if(_lname MATCHES "${_re}")
+                    set(${_out} TRUE PARENT_SCOPE)
+                    return()
+                endif()
+            endforeach()
+            set(${_out} FALSE PARENT_SCOPE)
+        endfunction()
+
+        set(_staged "")
         foreach(_dll IN LISTS _resolved)
+            file(TO_CMAKE_PATH "${_dll}" _path)
+            lsd2dsl_is_skipped("${_path}" _skipped)
+            if(_skipped)
+                continue()
+            endif()
             file(INSTALL
-                DESTINATION "${CMAKE_INSTALL_PREFIX}/${LSD2DSL_BINDIR}"
+                DESTINATION "${_bindir}"
                 TYPE SHARED_LIBRARY
                 FOLLOW_SYMLINK_CHAIN
-                FILES "${_dll}")
+                FILES "${_path}")
+            get_filename_component(_name "${_path}" NAME)
+            list(APPEND _staged "${_name}")
         endforeach()
-        list(LENGTH _resolved _n)
-        message(STATUS "staged ${_n} runtime DLL(s) from ${LSD2DSL_DLL_DIRS}")
-        # Qt DLLs are excluded above and deployed by windeployqt; anything else
-        # left unresolved would be missing on the user's machine as well.
-        if(_unresolved)
-            message(FATAL_ERROR "unresolved runtime dependencies: ${_unresolved}\n"
+        message(STATUS "staged runtime DLLs: ${_staged}")
+
+        set(_missing "")
+        foreach(_dep IN LISTS _unresolved)
+            lsd2dsl_is_skipped("${_dep}" _skipped)
+            if(NOT _skipped)
+                list(APPEND _missing "${_dep}")
+            endif()
+        endforeach()
+        if(_missing)
+            message(FATAL_ERROR "unresolved runtime dependencies: ${_missing}\n"
                                 "searched: ${LSD2DSL_DLL_DIRS}")
         endif()
     ]])

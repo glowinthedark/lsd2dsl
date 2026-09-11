@@ -54,7 +54,39 @@ install(TARGETS ${PROJECT_NAME}
 )
 
 if(WIN32)
-    install(FILES $<TARGET_RUNTIME_DLLS:${PROJECT_NAME}> DESTINATION ${CMAKE_INSTALL_BINDIR})
+    # $<TARGET_RUNTIME_DLLS> only covers DLLs reachable through imported CMake
+    # targets: vcpkg's zlib/ogg/vorbis are linked as raw .lib paths, and
+    # libsndfile's own dependencies (FLAC, opus, mpg123, mp3lame) are not link
+    # dependencies of this executable at all. Walk the PE import tables instead.
+    set(_lsd2dsl_dll_dirs "")
+    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+        list(APPEND _lsd2dsl_dll_dirs "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+    endif()
+    install(CODE "set(LSD2DSL_DLL_DIRS \"${_lsd2dsl_dll_dirs}\")")
+    install(CODE "set(LSD2DSL_BINDIR \"${CMAKE_INSTALL_BINDIR}\")")
+    install(CODE [[
+        set(_exe "${CMAKE_INSTALL_PREFIX}/${LSD2DSL_BINDIR}/lsd2dsl.exe")
+        file(GET_RUNTIME_DEPENDENCIES
+            EXECUTABLES "${_exe}"
+            RESOLVED_DEPENDENCIES_VAR _resolved
+            UNRESOLVED_DEPENDENCIES_VAR _unresolved
+            DIRECTORIES ${LSD2DSL_DLL_DIRS}
+            PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-" "^Qt6" "^d3d" "^dxgi" "^opengl32"
+            POST_EXCLUDE_REGEXES "[Ss]ystem32" "[Ww]indows[/\\]"
+        )
+        foreach(_dll IN LISTS _resolved)
+            file(INSTALL
+                DESTINATION "${CMAKE_INSTALL_PREFIX}/${LSD2DSL_BINDIR}"
+                TYPE SHARED_LIBRARY
+                FOLLOW_SYMLINK_CHAIN
+                FILES "${_dll}")
+        endforeach()
+        # Qt DLLs are excluded above and deployed by windeployqt; anything else
+        # left unresolved would be a DLL the user does not have either.
+        foreach(_miss IN LISTS _unresolved)
+            message(WARNING "unresolved runtime dependency: ${_miss}")
+        endforeach()
+    ]])
 endif()
 
 # Qt >= 6.3 ships a first-class deployment API; it replaces the hand-rolled DLL

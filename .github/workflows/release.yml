@@ -379,7 +379,10 @@ jobs:
           $zip = [System.IO.Compression.ZipFile]::OpenRead($zips[0].FullName)
           $names = $zip.Entries | ForEach-Object { Split-Path $_.FullName -Leaf }
           $zip.Dispose()
-          foreach ($req in 'lsd2dsl.exe','Qt6Core.dll','Qt6Widgets.dll','qwindows.dll','QtWebEngineProcess.exe') {
+          $required = 'lsd2dsl.exe','Qt6Core.dll','Qt6Widgets.dll','qwindows.dll','QtWebEngineProcess.exe',
+                      'z.dll','sndfile.dll','ogg.dll','vorbis.dll','vorbisenc.dll','vorbisfile.dll',
+                      'FLAC.dll','opus.dll','mpg123.dll','libmp3lame.dll'
+          foreach ($req in $required) {
             if ($names -notcontains $req) { throw "$req missing from $($zips[0].Name)" }
           }
           $zips | Move-Item -Destination dist -Force

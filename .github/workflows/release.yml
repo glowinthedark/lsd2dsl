@@ -233,7 +233,9 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       VCPKG_DIR: C:\vcpkg
       VCPKG_TRIPLET: x64-windows
-      VCPKG_PACKAGES: boost-program-options fmt zlib libogg libvorbis libsndfile[core,external-libs,mpeg]
+      # boost-locale[core] = no ICU default feature; only the header-only
+      # boost::locale::conv::utf_to_utf templates are used (lib/common/CommonTools.cpp)
+      VCPKG_PACKAGES: boost-program-options boost-locale[core] fmt zlib libogg libvorbis libsndfile[core,external-libs,mpeg]
       QT_ROOT: C:\Qt
       BUILD_CONFIG: RelWithDebInfo
     defaults:
@@ -254,9 +256,19 @@ jobs:
           if (-not (Test-Path "$env:VCPKG_DIR\vcpkg.exe")) { throw "vcpkg not found at $env:VCPKG_DIR" }
           $pkgs = $env:VCPKG_PACKAGES -split ' '
           & "$env:VCPKG_DIR\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET --recurse @pkgs
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "retrying with boost-locale default features (ICU)"
+            $pkgs = $pkgs | ForEach-Object { if ($_ -eq 'boost-locale[core]') { 'boost-locale' } else { $_ } }
+            & "$env:VCPKG_DIR\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET --recurse @pkgs
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          }
 
           $inst = "$env:VCPKG_DIR\installed\$env:VCPKG_TRIPLET"
+          foreach ($h in 'boost\version.hpp','boost\locale.hpp','boost\program_options.hpp') {
+            if (Test-Path "$inst\include\$h") { continue }
+            & "$env:VCPKG_DIR\vcpkg.exe" list
+            throw "missing header $h under $inst\include"
+          }
           if (-not (Test-Path "$inst\include\boost\version.hpp")) {
             & "$env:VCPKG_DIR\vcpkg.exe" list
             Get-ChildItem "$env:VCPKG_DIR\installed" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host

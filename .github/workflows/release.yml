@@ -235,7 +235,7 @@ jobs:
       VCPKG_TRIPLET: x64-windows
       # boost-locale[core] = no ICU default feature; only the header-only
       # boost::locale::conv::utf_to_utf templates are used (lib/common/CommonTools.cpp)
-      VCPKG_PACKAGES: boost-program-options boost-locale[core] fmt zlib libogg libvorbis libsndfile[core,external-libs,mpeg]
+      VCPKG_PACKAGES: boost-algorithm boost-format boost-interprocess boost-lexical-cast boost-locale[core] boost-program-options boost-range fmt zlib libogg libvorbis libsndfile[core,external-libs,mpeg]
       QT_ROOT: C:\Qt
       BUILD_CONFIG: RelWithDebInfo
     defaults:
@@ -264,19 +264,25 @@ jobs:
           }
 
           $inst = "$env:VCPKG_DIR\installed\$env:VCPKG_TRIPLET"
-          foreach ($h in 'boost\version.hpp','boost\locale.hpp','boost\program_options.hpp') {
-            if (Test-Path "$inst\include\$h") { continue }
+          # every Boost header the tree includes; a missing port must fail here,
+          # not a thousand lines into the compile
+          $needed = @(
+            'boost\algorithm\string.hpp',
+            'boost\format.hpp',
+            'boost\interprocess\streams\bufferstream.hpp',
+            'boost\lexical_cast.hpp',
+            'boost\locale.hpp',
+            'boost\program_options.hpp',
+            'boost\range\algorithm.hpp',
+            'boost\range\algorithm_ext\erase.hpp',
+            'boost\range\irange.hpp',
+            'boost\version.hpp'
+          )
+          $missing = @($needed | Where-Object { -not (Test-Path "$inst\include\$_") })
+          if ($missing.Count -gt 0) {
             & "$env:VCPKG_DIR\vcpkg.exe" list
-            throw "missing header $h under $inst\include"
+            throw "missing headers under $inst\include : $($missing -join ', ')"
           }
-          if (-not (Test-Path "$inst\include\boost\version.hpp")) {
-            & "$env:VCPKG_DIR\vcpkg.exe" list
-            Get-ChildItem "$env:VCPKG_DIR\installed" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
-            throw "boost headers missing under $inst"
-          }
-          Write-Host "boost cmake configs:"
-          Get-ChildItem $inst -Recurse -Include 'BoostConfig.cmake','boost_program_options-config.cmake' `
-            -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
           "VCPKG_INSTALLED=$inst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Cache Qt

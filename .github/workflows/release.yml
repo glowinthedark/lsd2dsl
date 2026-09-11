@@ -30,7 +30,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -73,7 +73,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       QT_ROOT: /home/runner/Qt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -91,7 +91,7 @@ jobs:
 
       - name: Cache Qt
         id: cache-qt
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.QT_ROOT }}
           key: qt-linux-${{ env.QT_VERSION }}-gcc_64-webengine-serialport
@@ -166,7 +166,7 @@ jobs:
           chmod +x "$out"
           mkdir -p dist && mv "$out" dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/*
@@ -174,11 +174,27 @@ jobs:
 
   macos:
     needs: prepare
-    runs-on: macos-26
+    runs-on: macos-15
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
+      # Pin the ABI floor instead of inheriting whatever SDK the runner carries:
+      # CMake seeds CMAKE_OSX_DEPLOYMENT_TARGET from this, and app/Info.plist.in
+      # writes it into LSMinimumSystemVersion. Homebrew bottles are built per OS
+      # release, so this must track the runs-on label above.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - name: Check the runner matches the deployment target
+        run: |
+          set -euo pipefail
+          runner_major=$(sw_vers -productVersion | cut -d. -f1)
+          target_major=${MACOSX_DEPLOYMENT_TARGET%%.*}
+          if [ "$runner_major" != "$target_major" ]; then
+            echo "::error::runner is macOS $runner_major but MACOSX_DEPLOYMENT_TARGET is $MACOSX_DEPLOYMENT_TARGET;"
+            echo "::error::Homebrew bottles are built for the runner OS, so the bundle would claim a floor it cannot honour."
+            exit 1
+          fi
 
       - name: Install build dependencies
         run: |
@@ -192,27 +208,16 @@ jobs:
       - name: Package .app bundle
         run: |
           set -euxo pipefail
-          QT_PREFIX="$(brew --prefix qt)"
+          # The bundle is produced by the build (MACOSX_BUNDLE) and filled in by
+          # Qt's CMake deployment API (macdeployqt); CI only signs and archives.
+          rm -rf dist
+          cmake --install build --prefix dist
           APP=dist/lsd2dsl.app
-          rm -rf dist && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp build/app/lsd2dsl "$APP/Contents/MacOS/lsd2dsl"
-          cat > "$APP/Contents/Info.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleExecutable</key><string>lsd2dsl</string>
-            <key>CFBundleIdentifier</key><string>org.lsd2dsl.lsd2dsl</string>
-            <key>CFBundleName</key><string>lsd2dsl</string>
-            <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-            <key>CFBundleVersion</key><string>${VERSION}</string>
-            <key>LSMinimumSystemVersion</key><string>$(sw_vers -productVersion | cut -d. -f1).0</string>
-            <key>NSHighResolutionCapable</key><true/>
-          </dict>
-          </plist>
-          PLIST
-          "$QT_PREFIX/bin/macdeployqt" "$APP" -always-overwrite -no-strip
+          [ -d "$APP" ] || { echo "::error::cmake --install produced no bundle"; exit 1; }
+          test -d "$APP/Contents/Frameworks/QtCore.framework" || \
+            { echo "::error::macdeployqt did not populate Contents/Frameworks"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist"
+
           # ad-hoc signature: unsigned relocated dylibs are killed by arm64 codesign enforcement
           codesign --force --deep --sign - "$APP"
           codesign --verify --deep --strict "$APP"
@@ -220,7 +225,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/lsd2dsl-${VERSION}-macos-${arch}.zip"
           rm -rf "$APP"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/*
@@ -242,10 +247,10 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\vcpkg\installed
           key: vcpkg-windows-x64-${{ hashFiles('.github/workflows/release.yml') }}
@@ -287,7 +292,7 @@ jobs:
 
       - name: Cache Qt
         id: cache-qt
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.QT_ROOT }}
           key: qt-windows-${{ env.QT_VERSION }}-msvc2022_64-webengine
@@ -357,6 +362,9 @@ jobs:
       - name: Package ZIP
         run: |
           $ErrorActionPreference = 'Stop'
+          # CPack drives the install rules; windeployqt runs from the Qt CMake
+          # deployment API (app/CMakeLists.txt), so Qt plugins, the WebEngine
+          # resources and QtWebEngineProcess.exe are staged by Qt itself.
           Push-Location build
           cpack -G ZIP -C "$env:BUILD_CONFIG"
           $rc = $LASTEXITCODE
@@ -364,10 +372,19 @@ jobs:
           if ($rc -ne 0) { throw "cpack failed" }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           $zips = @(Get-ChildItem build\*.zip)
-          if ($zips.Count -eq 0) { throw "cpack produced no archive" }
+          if ($zips.Count -ne 1) { throw "cpack produced $($zips.Count) archives, expected 1" }
+
+          # a zip that misses the Qt runtime only fails on the user's machine
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($zips[0].FullName)
+          $names = $zip.Entries | ForEach-Object { Split-Path $_.FullName -Leaf }
+          $zip.Dispose()
+          foreach ($req in 'lsd2dsl.exe','Qt6Core.dll','Qt6Widgets.dll','qwindows.dll','QtWebEngineProcess.exe') {
+            if ($names -notcontains $req) { throw "$req missing from $($zips[0].Name)" }
+          }
           $zips | Move-Item -Destination dist -Force
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*
@@ -382,12 +399,12 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       DRAFT: ${{ inputs.draft }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

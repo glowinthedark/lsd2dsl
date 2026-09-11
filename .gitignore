@@ -5,3 +5,4 @@ compile_commands.jsonbuild/
 CMakeFiles/
 CMakeCache.txt
 build/
+.DS_Store

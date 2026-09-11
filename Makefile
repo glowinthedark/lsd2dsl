@@ -21,7 +21,12 @@ CONFIGURE := cmake -S . -B $(BUILD_DIR) \
 	-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
 	-DCMAKE_PREFIX_PATH="$(CMAKE_PREFIX_PATH)"
 
+# on macOS the app target is a bundle (see app/CMakeLists.txt)
+ifeq ($(shell uname -s),Darwin)
+BINARY := $(BUILD_DIR)/app/lsd2dsl.app/Contents/MacOS/lsd2dsl
+else
 BINARY := $(BUILD_DIR)/app/lsd2dsl
+endif
 
 .PHONY: help deps configure build test run clean distclean rebuild
 

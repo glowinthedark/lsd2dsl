@@ -58,10 +58,21 @@ if(WIN32)
     # targets: vcpkg's zlib/ogg/vorbis are linked as raw .lib paths, and
     # libsndfile's own dependencies (FLAC, opus, mpg123, mp3lame) are not link
     # dependencies of this executable at all. Walk the PE import tables instead.
-    set(_lsd2dsl_dll_dirs "")
-    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
-        list(APPEND _lsd2dsl_dll_dirs "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
-    endif()
+    # Search dirs, in order of reliability: explicitly configured (the CI passes
+    # the vcpkg bin dir), vcpkg's own variables when the toolchain exports them,
+    # and the build dir, which vcpkg's applocal deployment already populated.
+    set(LSD2DSL_RUNTIME_DLL_DIRS "" CACHE STRING
+        "Extra directories searched for runtime DLLs when packaging")
+    set(_lsd2dsl_dll_dirs ${LSD2DSL_RUNTIME_DLL_DIRS})
+    foreach(_root IN ITEMS "${VCPKG_INSTALLED_DIR}" "${_VCPKG_INSTALLED_DIR}")
+        if(_root AND VCPKG_TARGET_TRIPLET AND IS_DIRECTORY "${_root}/${VCPKG_TARGET_TRIPLET}/bin")
+            list(APPEND _lsd2dsl_dll_dirs "${_root}/${VCPKG_TARGET_TRIPLET}/bin")
+        endif()
+    endforeach()
+    list(APPEND _lsd2dsl_dll_dirs "${CMAKE_CURRENT_BINARY_DIR}")
+    list(REMOVE_DUPLICATES _lsd2dsl_dll_dirs)
+    message(STATUS "runtime DLL search path: ${_lsd2dsl_dll_dirs}")
+
     install(CODE "set(LSD2DSL_DLL_DIRS \"${_lsd2dsl_dll_dirs}\")")
     install(CODE "set(LSD2DSL_BINDIR \"${CMAKE_INSTALL_BINDIR}\")")
     install(CODE [[
@@ -81,11 +92,14 @@ if(WIN32)
                 FOLLOW_SYMLINK_CHAIN
                 FILES "${_dll}")
         endforeach()
+        list(LENGTH _resolved _n)
+        message(STATUS "staged ${_n} runtime DLL(s) from ${LSD2DSL_DLL_DIRS}")
         # Qt DLLs are excluded above and deployed by windeployqt; anything else
-        # left unresolved would be a DLL the user does not have either.
-        foreach(_miss IN LISTS _unresolved)
-            message(WARNING "unresolved runtime dependency: ${_miss}")
-        endforeach()
+        # left unresolved would be missing on the user's machine as well.
+        if(_unresolved)
+            message(FATAL_ERROR "unresolved runtime dependencies: ${_unresolved}\n"
+                                "searched: ${LSD2DSL_DLL_DIRS}")
+        endif()
     ]])
 endif()
 

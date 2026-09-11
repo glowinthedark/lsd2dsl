@@ -94,7 +94,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.QT_ROOT }}
-          key: qt-linux-${{ env.QT_VERSION }}-gcc_64-webengine
+          key: qt-linux-${{ env.QT_VERSION }}-gcc_64-webengine-serialport
 
       - name: Install Qt
         if: steps.cache-qt.outputs.cache-hit != 'true'
@@ -103,11 +103,11 @@ jobs:
           # Ubuntu 24.04 ships Qt 6.4, which lacks QString::operator+=(QUtf8StringView)
           # (Qt >= 6.5) used by lib/duden; install the same Qt as the other platforms.
           python3 -m pip install --user --quiet --disable-pip-version-check aqtinstall
-          mods="qt5compat qtwebengine qtwebchannel qtpositioning qtpdf"
+          mods="qt5compat qtwebengine qtwebchannel qtpositioning qtserialport qtpdf"
           python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -m $mods -O "$QT_ROOT" || {
             echo "retrying without the qtpdf module"
             python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
-              -m qt5compat qtwebengine qtwebchannel qtpositioning -O "$QT_ROOT"
+              -m qt5compat qtwebengine qtwebchannel qtpositioning qtserialport -O "$QT_ROOT"
           }
 
       - name: Configure and build
@@ -256,6 +256,17 @@ jobs:
           & "$env:VCPKG_DIR\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET --recurse @pkgs
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
 
+          $inst = "$env:VCPKG_DIR\installed\$env:VCPKG_TRIPLET"
+          if (-not (Test-Path "$inst\include\boost\version.hpp")) {
+            & "$env:VCPKG_DIR\vcpkg.exe" list
+            Get-ChildItem "$env:VCPKG_DIR\installed" -ErrorAction SilentlyContinue | Format-Table -AutoSize | Out-String | Write-Host
+            throw "boost headers missing under $inst"
+          }
+          Write-Host "boost cmake configs:"
+          Get-ChildItem $inst -Recurse -Include 'BoostConfig.cmake','boost_program_options-config.cmake' `
+            -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
+          "VCPKG_INSTALLED=$inst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Cache Qt
         id: cache-qt
         uses: actions/cache@v4
@@ -316,7 +327,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_DIR\scripts\buildsystems\vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET `
             -DQt6_ROOT=$qt6 `
-            -DCMAKE_PREFIX_PATH=$qt6
+            -DBOOST_ROOT="$env:VCPKG_INSTALLED" `
+            -DCMAKE_PREFIX_PATH="$qt6;$env:VCPKG_INSTALLED"
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
           cmake --build build --target lsd2dsl
           if ($LASTEXITCODE -ne 0) { throw "build failed" }

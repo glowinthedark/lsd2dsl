@@ -319,16 +319,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $qt6 = "$env:QT_ROOT\$env:QT_VERSION\msvc2022_64"
           if (-not (Test-Path $qt6)) { throw "Qt not found at $qt6" }
+          # every -D value must be quoted: PowerShell does not expand $env:NAME
+          # inside a bare -DKEY=$env:NAME token, it passes the literal text
           cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=$env:BUILD_CONFIG `
-            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
-            -DCMAKE_POLICY_DEFAULT_CMP0167=NEW `
-            -DENABLE_DUDEN=ON `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_DIR\scripts\buildsystems\vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET `
-            -DQt6_ROOT=$qt6 `
-            -DBOOST_ROOT="$env:VCPKG_INSTALLED" `
-            -DCMAKE_PREFIX_PATH="$qt6;$env:VCPKG_INSTALLED"
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_CONFIG" `
+            "-DCMAKE_C_COMPILER=cl" "-DCMAKE_CXX_COMPILER=cl" `
+            "-DCMAKE_POLICY_DEFAULT_CMP0167=NEW" `
+            "-DCMAKE_POLICY_DEFAULT_CMP0144=NEW" `
+            "-DENABLE_DUDEN=ON" `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_DIR\scripts\buildsystems\vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET" `
+            "-DQt6_ROOT=$qt6" `
+            "-DBOOST_ROOT=$env:VCPKG_INSTALLED" `
+            "-DCMAKE_PREFIX_PATH=$qt6;$env:VCPKG_INSTALLED"
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
           cmake --build build --target lsd2dsl
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
@@ -337,7 +340,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location build
-          cpack -G ZIP -C $env:BUILD_CONFIG
+          cpack -G ZIP -C "$env:BUILD_CONFIG"
           $rc = $LASTEXITCODE
           Pop-Location
           if ($rc -ne 0) { throw "cpack failed" }

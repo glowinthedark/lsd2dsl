@@ -11,7 +11,7 @@ static int readbyte(void* ptr) {
     assert(0);
 }
 
-static int flush(void* a, int b, int c, int d) {
+static int flush(void* a, const void* b, unsigned long c, int d) {
     assert(0);
 }
 

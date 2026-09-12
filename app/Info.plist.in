@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>lsd2dsl</string>
+    <key>CFBundleIdentifier</key><string>org.lsd2dsl.lsd2dsl</string>
+    <key>CFBundleName</key><string>lsd2dsl</string>
+    <key>CFBundleDisplayName</key><string>lsd2dsl</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>@CMAKE_PROJECT_VERSION@</string>
+    <key>CFBundleVersion</key><string>@CMAKE_PROJECT_VERSION@</string>
+    <key>LSMinimumSystemVersion</key><string>@LSD2DSL_MIN_MACOS@</string>
+    <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>

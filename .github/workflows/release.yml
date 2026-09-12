@@ -1,0 +1,439 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (created if missing; defaults to the latest existing tag)"
+        required: false
+        type: string
+      draft:
+        description: "Publish the release as a draft"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
+env:
+  QT_VERSION: "6.8.3"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve tag and project version
+        id: resolve
+        shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^[[:space:]]*project(lsd2dsl[[:space:]][[:space:]]*VERSION[[:space:]][[:space:]]*\([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          version=${version%%$'\n'*}
+          [ -n "$version" ] || { echo "::error::cannot parse project version from CMakeLists.txt"; exit 1; }
+
+          tag="$(printf '%s' "${TAG_INPUT:-}" | tr -d '[:space:]')"
+          if [ -z "$tag" ]; then
+            tags=$(git tag --list --sort=-v:refname)
+            tag=${tags%%$'\n'*}
+            [ -n "$tag" ] || { echo "::error::repository has no tags and no tag input was given"; exit 1; }
+            echo "No tag input; using latest existing tag: $tag"
+          else
+            case "$tag" in
+              -*|*' '*|*'..'*|*'~'*|*'^'*|*':'*|*'?'*|*'*'*|*'['*|*'\'*) echo "::error::invalid tag name: $tag"; exit 1;;
+            esac
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              echo "Tag $tag already exists; artifacts will be overwritten"
+            else
+              echo "Tag $tag does not exist; it will be created at $GITHUB_SHA"
+            fi
+          fi
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "### lsd2dsl $version -> $tag" >> "$GITHUB_STEP_SUMMARY"
+
+  linux:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      QT_ROOT: /home/runner/Qt
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build patchelf file desktop-file-utils fuse3 \
+            libboost-program-options-dev libfmt-dev zlib1g-dev \
+            libsndfile1-dev libvorbis-dev libogg-dev \
+            libgl1-mesa-dev libglx-dev libegl1 libopengl-dev \
+            libxkbcommon-dev libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libfontconfig1 \
+            libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libasound2t64
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.QT_ROOT }}
+          key: qt-linux-${{ env.QT_VERSION }}-gcc_64-webengine-serialport
+
+      - name: Install Qt
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          # Ubuntu 24.04 ships Qt 6.4, which lacks QString::operator+=(QUtf8StringView)
+          # (Qt >= 6.5) used by lib/duden; install the same Qt as the other platforms.
+          python3 -m pip install --user --quiet --disable-pip-version-check aqtinstall
+          mods="qt5compat qtwebengine qtwebchannel qtpositioning qtserialport qtpdf"
+          python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -m $mods -O "$QT_ROOT" || {
+            echo "retrying without the qtpdf module"
+            python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 \
+              -m qt5compat qtwebengine qtwebchannel qtpositioning qtserialport -O "$QT_ROOT"
+          }
+
+      - name: Configure and build
+        run: |
+          set -euxo pipefail
+          QT_DIR="$QT_ROOT/$QT_VERSION/gcc_64"
+          [ -d "$QT_DIR" ] || { echo "::error::Qt not found at $QT_DIR"; exit 1; }
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENABLE_DUDEN=ON \
+            -DQt6_ROOT="$QT_DIR" \
+            -DCMAKE_PREFIX_PATH="$QT_DIR"
+          cmake --build build --target lsd2dsl -j"$(nproc)"
+
+      - name: Fetch linuxdeploy
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/tools"
+          cd "$RUNNER_TEMP/tools"
+          curl -fsSL -o linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy*.AppImage
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          EXTRA_PLATFORM_PLUGINS: libqxcb.so
+        run: |
+          set -euxo pipefail
+          QT_DIR="$QT_ROOT/$QT_VERSION/gcc_64"
+          export QMAKE="$QT_DIR/bin/qmake6"
+          export LD_LIBRARY_PATH="$QT_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export PATH="$RUNNER_TEMP/tools:$QT_DIR/bin:$PATH"
+          LD=$RUNNER_TEMP/tools/linuxdeploy-x86_64.AppImage
+          rm -rf AppDir
+          "$LD" --plugin qt \
+            --appdir AppDir \
+            -d scripts/appimage/lsd2dsl.desktop \
+            -e build/app/lsd2dsl \
+            -i scripts/appimage/lsd2dsl.svg
+
+          # QtWebEngine runtime bits the qt plugin does not always pick up
+          mkdir -p AppDir/usr/resources AppDir/usr/libexec AppDir/usr/translations
+          cp -an "$QT_DIR/resources/." AppDir/usr/resources/ || true
+          cp -an "$QT_DIR/libexec/QtWebEngineProcess" AppDir/usr/libexec/ || true
+          cp -an "$QT_DIR/translations/qtwebengine_locales" AppDir/usr/translations/ || true
+          test -f AppDir/usr/resources/v8_context_snapshot.bin || \
+            echo "::warning::v8_context_snapshot.bin missing from AppDir"
+
+          "$LD" --appdir AppDir --output appimage
+          libc=$(ldd --version | sed -n '1s/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+          out="lsd2dsl-${VERSION}-x86_64.glibc_${libc}.AppImage"
+          mv lsd2dsl*-x86_64.AppImage "$out"
+          chmod +x "$out"
+          mkdir -p dist && mv "$out" dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: prepare
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      # Pin the ABI floor instead of inheriting whatever SDK the runner carries:
+      # CMake seeds CMAKE_OSX_DEPLOYMENT_TARGET from this, and app/Info.plist.in
+      # writes it into LSMinimumSystemVersion. Homebrew bottles are built per OS
+      # release, so this must track the runs-on label above.
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the runner matches the deployment target
+        run: |
+          set -euo pipefail
+          runner_major=$(sw_vers -productVersion | cut -d. -f1)
+          target_major=${MACOSX_DEPLOYMENT_TARGET%%.*}
+          if [ "$runner_major" != "$target_major" ]; then
+            echo "::error::runner is macOS $runner_major but MACOSX_DEPLOYMENT_TARGET is $MACOSX_DEPLOYMENT_TARGET;"
+            echo "::error::Homebrew bottles are built for the runner OS, so the bundle would claim a floor it cannot honour."
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          brew update --quiet
+          brew install cmake boost qt qtwebengine fmt libsndfile libvorbis libogg
+
+      - name: Build
+        run: make build BUILD_TYPE=RelWithDebInfo
+
+      - name: Package .app bundle
+        run: |
+          set -euxo pipefail
+          # The bundle is produced by the build (MACOSX_BUNDLE) and filled in by
+          # Qt's CMake deployment API (macdeployqt); CI only signs and archives.
+          rm -rf dist
+          cmake --install build --prefix dist
+          APP=dist/lsd2dsl.app
+          [ -d "$APP" ] || { echo "::error::cmake --install produced no bundle"; exit 1; }
+          test -d "$APP/Contents/Frameworks/QtCore.framework" || \
+            { echo "::error::macdeployqt did not populate Contents/Frameworks"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist"
+
+          # ad-hoc signature: unsigned relocated dylibs are killed by arm64 codesign enforcement
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          arch=$(uname -m)
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/lsd2dsl-${VERSION}-macos-${arch}.zip"
+          rm -rf "$APP"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: prepare
+    runs-on: windows-2025
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      VCPKG_DIR: C:\vcpkg
+      VCPKG_TRIPLET: x64-windows
+      # boost-locale[core] = no ICU default feature; only the header-only
+      # boost::locale::conv::utf_to_utf templates are used (lib/common/CommonTools.cpp)
+      VCPKG_PACKAGES: boost-algorithm boost-format boost-interprocess boost-lexical-cast boost-locale[core] boost-program-options boost-range fmt zlib libogg libvorbis libsndfile[core,external-libs,mpeg]
+      QT_ROOT: C:\Qt
+      BUILD_CONFIG: RelWithDebInfo
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v6
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-windows-x64-${{ hashFiles('.github/workflows/release.yml') }}
+
+      - name: Install vcpkg dependencies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "$env:VCPKG_DIR\vcpkg.exe")) { throw "vcpkg not found at $env:VCPKG_DIR" }
+          $pkgs = $env:VCPKG_PACKAGES -split ' '
+          & "$env:VCPKG_DIR\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET --recurse @pkgs
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "retrying with boost-locale default features (ICU)"
+            $pkgs = $pkgs | ForEach-Object { if ($_ -eq 'boost-locale[core]') { 'boost-locale' } else { $_ } }
+            & "$env:VCPKG_DIR\vcpkg.exe" install --triplet $env:VCPKG_TRIPLET --recurse @pkgs
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          }
+
+          $inst = "$env:VCPKG_DIR\installed\$env:VCPKG_TRIPLET"
+          # every Boost header the tree includes; a missing port must fail here,
+          # not a thousand lines into the compile
+          $needed = @(
+            'boost\algorithm\string.hpp',
+            'boost\format.hpp',
+            'boost\interprocess\streams\bufferstream.hpp',
+            'boost\lexical_cast.hpp',
+            'boost\locale.hpp',
+            'boost\program_options.hpp',
+            'boost\range\algorithm.hpp',
+            'boost\range\algorithm_ext\erase.hpp',
+            'boost\range\irange.hpp',
+            'boost\version.hpp'
+          )
+          $missing = @($needed | Where-Object { -not (Test-Path "$inst\include\$_") })
+          if ($missing.Count -gt 0) {
+            & "$env:VCPKG_DIR\vcpkg.exe" list
+            throw "missing headers under $inst\include : $($missing -join ', ')"
+          }
+          "VCPKG_INSTALLED=$inst" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.QT_ROOT }}
+          key: qt-windows-${{ env.QT_VERSION }}-msvc2022_64-webengine
+
+      - name: Install Qt
+        if: steps.cache-qt.outputs.cache-hit != 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check --quiet aqtinstall
+          $mods = @('qt5compat','qtwebengine','qtwebchannel','qtpositioning','qtpdf')
+          python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -m @mods -O $env:QT_ROOT
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "retrying without the qtpdf module (bundled with qtwebengine in some releases)"
+            $mods = $mods | Where-Object { $_ -ne 'qtpdf' }
+            python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -m @mods -O $env:QT_ROOT
+            if ($LASTEXITCODE -ne 0) { throw "aqt install-qt failed" }
+          }
+
+      - name: Set up MSVC environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The VS generator name is version-bound; vswhere + vcvars64 works for any
+          # installed Visual Studio (2022, 2026, Build Tools) and feeds Ninja instead.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found at $vswhere" }
+          $installs = & $vswhere -latest -prerelease -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vsPath = @($installs)[0]
+          if (-not $vsPath) {
+            Write-Host (& $vswhere -all -prerelease -products * -format json)
+            throw "no Visual Studio instance with the x64 C++ toolset"
+          }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          Write-Host "using $vsPath"
+
+          $skip = '^(GITHUB_|RUNNER_|ACTIONS_|VCPKG_|_$)'
+          & cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') {
+              $name = $matches[1]; $value = $matches[2]
+              if ($name -notmatch $skip) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
+            }
+          }
+
+      - name: Configure and build
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $qt6 = "$env:QT_ROOT\$env:QT_VERSION\msvc2022_64"
+          if (-not (Test-Path $qt6)) { throw "Qt not found at $qt6" }
+          # every -D value must be quoted: PowerShell does not expand $env:NAME
+          # inside a bare -DKEY=$env:NAME token, it passes the literal text
+          cmake -S . -B build -G Ninja `
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_CONFIG" `
+            "-DCMAKE_C_COMPILER=cl" "-DCMAKE_CXX_COMPILER=cl" `
+            "-DCMAKE_POLICY_DEFAULT_CMP0167=NEW" `
+            "-DCMAKE_POLICY_DEFAULT_CMP0144=NEW" `
+            "-DENABLE_DUDEN=ON" `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_DIR\scripts\buildsystems\vcpkg.cmake" `
+            "-DVCPKG_TARGET_TRIPLET=$env:VCPKG_TRIPLET" `
+            "-DQt6_ROOT=$qt6" `
+            "-DLSD2DSL_RUNTIME_DLL_DIRS=$($env:VCPKG_INSTALLED -replace '\\','/')/bin" `
+            "-DBOOST_ROOT=$env:VCPKG_INSTALLED" `
+            "-DCMAKE_PREFIX_PATH=$qt6;$env:VCPKG_INSTALLED"
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build build --target lsd2dsl
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Package ZIP
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # CPack drives the install rules; windeployqt runs from the Qt CMake
+          # deployment API (app/CMakeLists.txt), so Qt plugins, the WebEngine
+          # resources and QtWebEngineProcess.exe are staged by Qt itself.
+          Push-Location build
+          cpack -G ZIP -C "$env:BUILD_CONFIG"
+          $rc = $LASTEXITCODE
+          Pop-Location
+          if ($rc -ne 0) { throw "cpack failed" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $zips = @(Get-ChildItem build\*.zip)
+          if ($zips.Count -ne 1) { throw "cpack produced $($zips.Count) archives, expected 1" }
+
+          # a zip that misses the Qt runtime only fails on the user's machine
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($zips[0].FullName)
+          $names = $zip.Entries | ForEach-Object { Split-Path $_.FullName -Leaf }
+          $zip.Dispose()
+          $required = 'lsd2dsl.exe','Qt6Core.dll','Qt6Widgets.dll','qwindows.dll','QtWebEngineProcess.exe',
+                      'z.dll','sndfile.dll','ogg.dll','vorbis.dll','vorbisenc.dll','vorbisfile.dll',
+                      'FLAC.dll','opus.dll','mpg123.dll','libmp3lame.dll'
+          foreach ($req in $required) {
+            if ($names -notcontains $req) { throw "$req missing from $($zips[0].Name)" }
+          }
+          $zips | Move-Item -Destination dist -Force
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, linux, macos, windows]
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DRAFT: ${{ inputs.draft }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no artifacts to upload"; exit 1; }
+          ls -l "${files[@]}"
+
+          draft_flag=()
+          if [ "${DRAFT:-false}" = "true" ]; then draft_flag=(--draft); fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; overwriting artifacts"
+          else
+            # gh reuses an existing tag; --target only applies when the tag is created
+            gh release create "$TAG" \
+              --title "lsd2dsl $TAG" \
+              --notes "lsd2dsl ${VERSION} — automated build from ${GITHUB_SHA}." \
+              --target "$GITHUB_SHA" \
+              "${draft_flag[@]}"
+          fi
+
+          gh release upload "$TAG" "${files[@]}" --clobber
+          echo "Release: $(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"

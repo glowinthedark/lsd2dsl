@@ -1,4 +1,8 @@
 CMakeLists.txt.user*
 .vscode
 .cache
-compile_commands.json
+compile_commands.jsonbuild/
+CMakeFiles/
+CMakeCache.txt
+build/
+.DS_Store
